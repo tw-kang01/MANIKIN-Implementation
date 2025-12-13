@@ -1,0 +1,23 @@
+# MANIKIN Requirements
+# Python 3.10 environment with CUDA support
+
+# Core ML
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=2.0.0
+
+# SMPL Body Model
+smplx>=0.1.28
+
+# Data Processing
+scipy>=1.10.0
+pickle5; python_version < "3.8"
+
+# Visualization (optional)
+matplotlib>=3.7.0
+open3d>=0.17.0
+trimesh>=3.21.0
+
+# Utilities
+tqdm>=4.65.0
+PyYAML>=6.0

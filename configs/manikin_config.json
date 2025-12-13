@@ -1,0 +1,79 @@
+{
+  "task": "MANIKIN_Training",
+  "model": "manikin",
+  "gpu_ids": [0],
+
+  "path": {
+    "root": "Manikin/outputs",
+    "pretrained_netG": null
+  },
+
+  "support_dir": "AvatarPoser/support_data/",
+
+  "datasets": {
+    "train": {
+      "name": "manikin_train",
+      "dataset_type": "manikin",
+      "dataroot": [
+        "data_manikin/BioMotionLab_NTroje/train",
+        "data_manikin/MPI_HDM05/train",
+        "data_manikin/CMU/train"
+      ],
+      "dataloader_batch_size": 256,
+      "window_size": 40,
+      "dataloader_shuffle": true,
+      "dataloader_num_workers": 4,
+      "phase": "train"
+    },
+    "test": {
+      "name": "manikin_test",
+      "dataset_type": "manikin",
+      "dataroot": [
+        "data_manikin/BioMotionLab_NTroje/test",
+        "data_manikin/MPI_HDM05/test",
+        "data_manikin/CMU/test"
+      ],
+      "dataloader_batch_size": 1,
+      "window_size": 40,
+      "test_batch": 256,
+      "phase": "test"
+    }
+  },
+
+  "netG": {
+    "net_type": "MANIKIN",
+    "network_type": "v3",
+    "num_layer": 6,
+    "input_dim": 54,
+    "output_dim": 132,
+    "embed_dim": 256,
+    "nhead": 8,
+    "spatial_normalization": true,
+    "temporal_normalization": true,
+    "slowfast_fusion": true
+  },
+
+  "train": {
+    "num_epochs": 5000,
+    "G_optimizer_lr": 1e-4,
+    "G_scheduler_milestones": [10000, 20000, 30000],
+    "G_scheduler_gamma": 0.5,
+    "checkpoint_save": 1000,
+    "checkpoint_print": 100,
+    "checkpoint_test": 1000,
+    "G_optimizer_clipgrad": 1.0,
+    "lambda_weights": {
+      "ori": 0.05,
+      "swivel": 0.2,
+      "m": 0.2,
+      "rot": 1.0,
+      "foot": 1.0,
+      "FK_torso": 1.0
+    }
+  },
+
+  "is_train": true
+}
+
+
+

@@ -6,11 +6,23 @@
 #SBATCH -p batch_ugrad
 #SBATCH -w aurora-g8
 #SBATCH -t 1-0
-#SBATCH -o /data/ktw3389/repos/manikinsage/logs/slurm-%A.out
+#SBATCH -o logs/slurm-%A.out
 
 # =============================================================================
 # MANIKIN (ECCV 2024) Training Script for SLURM
 # Neural-Analytic Hybrid Full Body Pose Estimation
+#
+# Usage:
+#   1. Clone the repository:
+#      git clone https://github.com/tw-kang01/MANIKIN-Implementation.git
+#      cd MANIKIN-Implementation
+#
+#   2. Prepare datasets (extract to local disk for fast I/O):
+#      tar -xf /data/datasets/data_manikin.tar -C /local_datasets/$USER/
+#      tar -xf /data/datasets/body_models.tar -C /local_datasets/$USER/
+#
+#   3. Submit job:
+#      sbatch scripts/train_slurm.sh
 # =============================================================================
 
 hostname
@@ -25,18 +37,23 @@ echo "=========================================="
 # =============================================================================
 echo "[Step 1] Setting up directories..."
 
-# NAS 작업 디렉토리 (코드 실행)
-WORK_DIR=/data/ktw3389/repos/manikinsage
-LOG_DIR=$WORK_DIR/logs
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Repository root (parent of scripts/)
+REPO_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
+
+# Log directory
+LOG_DIR=$REPO_DIR/logs
 mkdir -p $LOG_DIR
 
-# 로컬 디스크 (빠른 I/O를 위한 데이터셋 캐시)
-LOCAL_DIR=/local_datasets/ktw3389
+# Local disk for fast I/O (datasets)
+LOCAL_DIR=/local_datasets/$USER
 mkdir -p $LOCAL_DIR
 
-echo "Work directory: $WORK_DIR"
+echo "Repository directory: $REPO_DIR"
 echo "Log directory: $LOG_DIR"
-echo "Local cache: $LOCAL_DIR"
+echo "Local data cache: $LOCAL_DIR"
 
 # =============================================================================
 # Step 2: Verify Datasets on Local Disk
@@ -56,10 +73,14 @@ else
 fi
 
 # body_models 확인 (SMPL-H)
-if [ -d "$LOCAL_DIR/AvatarPoser" ]; then
-    echo "✓ Body models found at $LOCAL_DIR/AvatarPoser"
+if [ -d "$LOCAL_DIR/support_data" ]; then
+    echo "✓ Body models found at $LOCAL_DIR/support_data"
+elif [ -d "$LOCAL_DIR/AvatarPoser/support_data" ]; then
+    echo "✓ Body models found at $LOCAL_DIR/AvatarPoser/support_data"
+    # Create symlink for compatibility
+    ln -sf $LOCAL_DIR/AvatarPoser/support_data $LOCAL_DIR/support_data 2>/dev/null || true
 else
-    echo "ERROR: Body models not found at $LOCAL_DIR/AvatarPoser"
+    echo "ERROR: Body models not found"
     echo ""
     echo "Please extract body models first:"
     echo "  tar -xf /data/datasets/body_models.tar -C $LOCAL_DIR/"
@@ -76,9 +97,6 @@ if [ -d "$LOCAL_DIR/data_manikin/BioMotionLab_NTroje/train" ]; then
     TRAIN_COUNT=$(ls -1 $LOCAL_DIR/data_manikin/BioMotionLab_NTroje/train/*.pkl 2>/dev/null | wc -l)
     TEST_COUNT=$(ls -1 $LOCAL_DIR/data_manikin/BioMotionLab_NTroje/test/*.pkl 2>/dev/null | wc -l)
     echo "✓ BioMotionLab_NTroje: ${TRAIN_COUNT} train, ${TEST_COUNT} test files"
-else
-    echo "✗ BioMotionLab_NTroje NOT found"
-    exit 1
 fi
 
 # MPI_HDM05
@@ -86,9 +104,6 @@ if [ -d "$LOCAL_DIR/data_manikin/MPI_HDM05/train" ]; then
     TRAIN_COUNT=$(ls -1 $LOCAL_DIR/data_manikin/MPI_HDM05/train/*.pkl 2>/dev/null | wc -l)
     TEST_COUNT=$(ls -1 $LOCAL_DIR/data_manikin/MPI_HDM05/test/*.pkl 2>/dev/null | wc -l)
     echo "✓ MPI_HDM05: ${TRAIN_COUNT} train, ${TEST_COUNT} test files"
-else
-    echo "✗ MPI_HDM05 NOT found"
-    exit 1
 fi
 
 # CMU
@@ -96,19 +111,21 @@ if [ -d "$LOCAL_DIR/data_manikin/CMU/train" ]; then
     TRAIN_COUNT=$(ls -1 $LOCAL_DIR/data_manikin/CMU/train/*.pkl 2>/dev/null | wc -l)
     TEST_COUNT=$(ls -1 $LOCAL_DIR/data_manikin/CMU/test/*.pkl 2>/dev/null | wc -l)
     echo "✓ CMU: ${TRAIN_COUNT} train, ${TEST_COUNT} test files"
-else
-    echo "✗ CMU NOT found"
-    exit 1
 fi
 
-# Body models
-if [ -f "$LOCAL_DIR/AvatarPoser/support_data/body_models/smplh/neutral/model.npz" ]; then
-    echo "✓ SMPL-H neutral model found"
+# Body models - check multiple possible locations
+SMPLH_PATH=""
+if [ -f "$LOCAL_DIR/support_data/body_models/smplh/neutral/model.npz" ]; then
+    SMPLH_PATH="$LOCAL_DIR/support_data/body_models/smplh/neutral/model.npz"
+elif [ -f "$LOCAL_DIR/AvatarPoser/support_data/body_models/smplh/neutral/model.npz" ]; then
+    SMPLH_PATH="$LOCAL_DIR/AvatarPoser/support_data/body_models/smplh/neutral/model.npz"
+fi
+
+if [ -n "$SMPLH_PATH" ]; then
+    echo "✓ SMPL-H neutral model found: $SMPLH_PATH"
+    SUPPORT_DIR=$(dirname $(dirname $(dirname $(dirname $SMPLH_PATH))))
 else
     echo "✗ SMPL-H neutral model NOT found"
-    echo "  Expected: $LOCAL_DIR/AvatarPoser/support_data/body_models/smplh/neutral/model.npz"
-    echo "  Available body_models structure:"
-    ls -la $LOCAL_DIR/AvatarPoser/support_data/body_models/ 2>/dev/null || echo "  (directory not found)"
     exit 1
 fi
 
@@ -119,15 +136,16 @@ echo "=== End Dataset Check ==="
 # =============================================================================
 echo "[Step 3] Setting up conda environment..."
 
-source /data/ktw3389/anaconda3/etc/profile.d/conda.sh
-conda activate manikin
+# Try common conda paths
+if [ -f "/data/$USER/anaconda3/etc/profile.d/conda.sh" ]; then
+    source /data/$USER/anaconda3/etc/profile.d/conda.sh
+elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
+    source $HOME/anaconda3/etc/profile.d/conda.sh
+elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source $HOME/miniconda3/etc/profile.d/conda.sh
+fi
 
-# 필수 패키지 확인
-echo "=== Checking/Installing Required Packages ==="
-pip install human-body-prior --quiet
-pip install pytorch3d --quiet
-pip install opencv-python --quiet
-echo "=== End Package Check ==="
+conda activate manikin
 
 # CUDA 확인
 echo "=== CUDA Check ==="
@@ -135,84 +153,62 @@ python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA av
 echo "=== End CUDA Check ==="
 
 # =============================================================================
-# Step 4: Update Config for Server Environment
+# Step 4: Generate Runtime Config
 # =============================================================================
-echo "[Step 4] Updating config for server environment..."
+echo "[Step 4] Generating runtime config..."
 
-cd $WORK_DIR
+cd $REPO_DIR
 
-# config 파일 백업
-cp Manikin/configs/manikin_config.json Manikin/configs/manikin_config_backup.json
-
-# manikin_config_server.json이 있으면 사용, 없으면 기본 config 사용
-if [ -f "Manikin/configs/manikin_config_server.json" ]; then
-    CONFIG_FILE="Manikin/configs/manikin_config_server.json"
-    echo "Using server config: $CONFIG_FILE"
-else
-    CONFIG_FILE="Manikin/configs/manikin_config.json"
-    echo "Using default config: $CONFIG_FILE"
-fi
-
-# Python으로 config 업데이트 (데이터 경로를 로컬 디스크로 변경)
+# Generate runtime config with correct paths
 python -c "
 import json
+import os
 
-# Load config
-with open('$CONFIG_FILE', 'r') as f:
-    lines = f.readlines()
-cleaned = []
-for line in lines:
-    if '//' in line:
-        line = line[:line.index('//')]
-    cleaned.append(line)
-config = json.loads(''.join(cleaned))
+# Load base config
+config_path = 'configs/manikin_config_server.json'
+if not os.path.exists(config_path):
+    config_path = 'configs/manikin_config.json'
 
-# Update dataset paths to local disk
+with open(config_path, 'r') as f:
+    content = f.read()
+# Remove // comments
+import re
+content = re.sub(r'//.*?\n', '\n', content)
+content = re.sub(r',(\s*[}\]])', r'\1', content)
+config = json.loads(content)
+
+# Update paths
+LOCAL_DIR = '$LOCAL_DIR'
+SUPPORT_DIR = '$SUPPORT_DIR'
+
 config['datasets']['train']['dataroot'] = [
-    '$LOCAL_DIR/data_manikin/BioMotionLab_NTroje/train',
-    '$LOCAL_DIR/data_manikin/MPI_HDM05/train',
-    '$LOCAL_DIR/data_manikin/CMU/train'
+    f'{LOCAL_DIR}/data_manikin/BioMotionLab_NTroje/train',
+    f'{LOCAL_DIR}/data_manikin/MPI_HDM05/train',
+    f'{LOCAL_DIR}/data_manikin/CMU/train'
 ]
 config['datasets']['test']['dataroot'] = [
-    '$LOCAL_DIR/data_manikin/BioMotionLab_NTroje/test',
-    '$LOCAL_DIR/data_manikin/MPI_HDM05/test',
-    '$LOCAL_DIR/data_manikin/CMU/test'
+    f'{LOCAL_DIR}/data_manikin/BioMotionLab_NTroje/test',
+    f'{LOCAL_DIR}/data_manikin/MPI_HDM05/test',
+    f'{LOCAL_DIR}/data_manikin/CMU/test'
 ]
 
-# Update body model path
-config['body_model_path'] = '$LOCAL_DIR/AvatarPoser/support_data/body_models/smplh/neutral/model.npz'
-config['support_dir'] = '$LOCAL_DIR/AvatarPoser/support_data/'
+config['support_dir'] = SUPPORT_DIR + '/'
+config['body_model_path'] = f'{SUPPORT_DIR}/body_models/smplh/neutral/model.npz'
 
-# Update training parameters for server (최신 설정 반영)
-config['datasets']['train']['dataloader_num_workers'] = 8
-config['datasets']['train']['dataloader_batch_size'] = 256
-config['datasets']['test']['dataloader_batch_size'] = 1  # Validation batch size (must be 1 for variable-length sequences)
-config['datasets']['test']['test_batch'] = 256  # Internal batching for validation (EgoPoser-style)
+# Output path (relative to repo)
+config['path']['root'] = 'outputs'
 
-# Training config - use values from config file (don't override num_epochs)
-# num_epochs is read from manikin_config_server.json
-config['train']['checkpoint_save'] = 1000
-config['train']['checkpoint_test'] = 1000  # Iteration-based validation
-config['train']['checkpoint_print'] = 100
-
-# Save updated config
-with open('Manikin/configs/manikin_config_runtime.json', 'w') as f:
+# Save runtime config
+with open('configs/manikin_config_runtime.json', 'w') as f:
     json.dump(config, f, indent=2)
 
-print('Config updated successfully!')
-print('\\n=== Training Configuration ===')
-print(f'Epochs: {config[\"train\"][\"num_epochs\"]}')
-print(f'Batch size (train): {config[\"datasets\"][\"train\"][\"dataloader_batch_size\"]}')
-print(f'Batch size (test): {config[\"datasets\"][\"test\"][\"dataloader_batch_size\"]} (set to 1 for variable-length sequences)')
-print(f'Workers: {config[\"datasets\"][\"train\"][\"dataloader_num_workers\"]}')
-print(f'Checkpoint save: every {config[\"train\"][\"checkpoint_save\"]} iterations')
-print(f'Validation: every {config[\"train\"][\"checkpoint_test\"]} iterations')
-print(f'\\nDataset paths:')
-for path in config['datasets']['train']['dataroot']:
-    print(f'  - {path}')
+print('Runtime config generated: configs/manikin_config_runtime.json')
+print(f'  - support_dir: {SUPPORT_DIR}')
+print(f'  - data: {LOCAL_DIR}/data_manikin/')
+print(f'  - outputs: outputs/')
 "
 
-echo "Config update complete!"
+echo "Config generation complete!"
 
 # =============================================================================
 # Step 5: Training Execution
@@ -222,27 +218,23 @@ echo "=========================================="
 echo "MANIKIN Training Configuration"
 echo "=========================================="
 echo "Model: MANIKINModelJLM (NN + Torso FK + Analytic IK)"
-echo "Script: Manikin/main_train.py"
-echo "Config: Manikin/configs/manikin_config_runtime.json"
+echo "Script: main_train.py"
+echo "Config: configs/manikin_config_runtime.json"
 echo ""
 echo "Training Setup:"
-echo "  - Epochs: (from config file - manikin_config_server.json)"
 echo "  - Batch Size: 256 (train), 1 (validation)"
-echo "  - Learning Rate: 1e-4 → 5e-5 → 2.5e-5 → 1.25e-5"
-echo "  - LR Schedule: [10k, 20k, 30k] iterations"
 echo "  - Checkpoints: Save every 1000 iterations"
-echo "  - Validation: Every 1000 iterations with MPJPE/MPJVE"
-echo "  - Note: Validation batch_size=1 to handle variable-length test sequences"
+echo "  - Validation: Every 1000 iterations"
 echo ""
 echo "Datasets: BioMotionLab_NTroje, MPI_HDM05, CMU"
 echo "=========================================="
 
 # Python path 설정
-export PYTHONPATH="$WORK_DIR:$PYTHONPATH"
+export PYTHONPATH="$REPO_DIR:$PYTHONPATH"
 
 # 학습 실행
 echo "Starting training at $(date)"
-python Manikin/main_train.py --config Manikin/configs/manikin_config_runtime.json
+python main_train.py --config configs/manikin_config_runtime.json
 
 TRAIN_EXIT_CODE=$?
 echo ""
@@ -259,27 +251,16 @@ echo "=========================================="
 # =============================================================================
 echo "[Step 6] Training results summary..."
 echo ""
-echo "Output directory: $WORK_DIR/Manikin/outputs/"
-echo "Model checkpoints saved to: Manikin/outputs/models/"
-echo "Training logs saved to: Manikin/outputs/logs/"
+echo "Output directory: $REPO_DIR/outputs/"
+echo "Model checkpoints: outputs/models/"
+echo "Training logs: outputs/logs/"
 echo ""
 echo "Latest checkpoint files:"
-if [ -d "$WORK_DIR/Manikin/outputs/models" ]; then
-    find $WORK_DIR/Manikin/outputs/models -name "*.pth" -type f -printf "%T@ %p\n" | sort -nr | head -5 | cut -d' ' -f2-
+if [ -d "$REPO_DIR/outputs/models" ]; then
+    find $REPO_DIR/outputs/models -name "*.pth" -type f -printf "%T@ %p\n" 2>/dev/null | sort -nr | head -5 | cut -d' ' -f2-
 else
     echo "  (No checkpoint files found)"
 fi
-
-# =============================================================================
-# Step 7: Cleanup (Optional)
-# =============================================================================
-echo ""
-echo "[Step 7] Cleanup options..."
-echo "Local cache preserved at: $LOCAL_DIR"
-echo ""
-echo "To free up space, manually run:"
-echo "  rm -rf $LOCAL_DIR/data_manikin"
-echo "  rm -rf $LOCAL_DIR/AvatarPoser"
 
 echo ""
 echo "=========================================="

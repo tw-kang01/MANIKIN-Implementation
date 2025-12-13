@@ -1,24 +1,24 @@
 {
-  "task": "MANIKIN_Training_Server",
+  "task": "MANIKIN_Training",
   "model": "manikin",
   "gpu_ids": [0],
 
   "path": {
-    "root": "Manikin/outputs",
+    "root": "outputs",
     "pretrained_netG": null
   },
 
-  "support_dir": "/local_datasets/ktw3389/AvatarPoser/support_data/",
-  "body_model_path": "/local_datasets/ktw3389/AvatarPoser/support_data/body_models/smplh/neutral/model.npz",
+  "support_dir": "/local_datasets/${USER}/support_data/",
+  "body_model_path": "/local_datasets/${USER}/support_data/body_models/smplh/neutral/model.npz",
 
   "datasets": {
     "train": {
       "name": "manikin_train",
       "dataset_type": "manikin",
       "dataroot": [
-        "/local_datasets/ktw3389/data_manikin/BioMotionLab_NTroje/train",
-        "/local_datasets/ktw3389/data_manikin/MPI_HDM05/train",
-        "/local_datasets/ktw3389/data_manikin/CMU/train"
+        "/local_datasets/${USER}/data_manikin/BioMotionLab_NTroje/train",
+        "/local_datasets/${USER}/data_manikin/MPI_HDM05/train",
+        "/local_datasets/${USER}/data_manikin/CMU/train"
       ],
       "dataloader_batch_size": 256,
       "window_size": 40,
@@ -30,28 +30,23 @@
       "name": "manikin_test",
       "dataset_type": "manikin",
       "dataroot": [
-        "/local_datasets/ktw3389/data_manikin/BioMotionLab_NTroje/test",
-        "/local_datasets/ktw3389/data_manikin/MPI_HDM05/test",
-        "/local_datasets/ktw3389/data_manikin/CMU/test"
+        "/local_datasets/${USER}/data_manikin/BioMotionLab_NTroje/test",
+        "/local_datasets/${USER}/data_manikin/MPI_HDM05/test",
+        "/local_datasets/${USER}/data_manikin/CMU/test"
       ],
       "dataloader_batch_size": 1,
       "window_size": 40,
-      "test_batch": 256,
       "phase": "test"
     }
   },
 
   "netG": {
     "net_type": "MANIKIN",
-    "network_type": "v3_large",
     "num_layer": 6,
     "input_dim": 54,
     "output_dim": 132,
     "embed_dim": 512,
-    "nhead": 8,
-    "spatial_normalization": true,
-    "temporal_normalization": true,
-    "slowfast_fusion": true
+    "nhead": 8
   },
 
   "train": {
@@ -62,7 +57,6 @@
     "checkpoint_save": 1000,
     "checkpoint_print": 100,
     "checkpoint_test": 1000,
-    "print_every_epoch": 10,
     "G_optimizer_clipgrad": 1.0,
     "lambda_weights": {
       "ori": 0.05,

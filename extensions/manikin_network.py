@@ -173,12 +173,12 @@ class MANIKINNetworkJLM(nn.Module):
     def __init__(
         self,
         embed_dim=512,
-        joint_embed_dim=256,
+        feat_dim=256,
         num_layer=6,
         s_layer=1,
         t_layer=1,
         nhead=8,
-        reg_hidden_dim=1024,
+        reg_hidden_dim=512,
     ):
         super().__init__()
 
@@ -186,7 +186,7 @@ class MANIKINNetworkJLM(nn.Module):
         self.input_dim = 3 * 18  # 54D: 3 sparse joints x 18D each
         self.output_dim = 68    # 42 + 8 + 18 (torso + swivel + foot with position)
         self.token_num = 16     # 3 input + 7 torso + 2 foot + 4 swivel
-        self.feat_dim = joint_embed_dim * 2  # 512
+        self.feat_dim = feat_dim  # Configurable transformer internal dimension
 
         # =============== Stage 1: Initial Prediction ===============
         # Sparse input → initial 68D output (like SimpleSMPL in AvatarJLM)
@@ -214,7 +214,7 @@ class MANIKINNetworkJLM(nn.Module):
         )
 
         # Positional embeddings
-        max_seq_len = 200
+        max_seq_len = 3000  # Support longer sequences during testing (some test seqs have 2000+ frames)
         self.temp_embed = nn.Parameter(torch.zeros(1, max_seq_len, 1, self.feat_dim))
         self.joint_embed = nn.Parameter(torch.zeros(1, 1, self.token_num, self.feat_dim))
         trunc_normal_(self.temp_embed, std=.02)
@@ -231,24 +231,26 @@ class MANIKINNetworkJLM(nn.Module):
 
         # Foot head: uses tokens [10:12] (2 foot joints)
         # Output: 2 ankles x (3D position + 6D rotation) = 18D
+        foot_hidden = min(256, self.feat_dim * 2)
         self.foot_head = nn.Sequential(
-            nn.Linear(self.feat_dim * 2, 256),
+            nn.Linear(self.feat_dim * 2, foot_hidden),
             nn.LeakyReLU(0.1),
-            nn.Linear(256, 18)  # 2 joints x (3D pos + 6D rot)
+            nn.Linear(foot_hidden, 18)  # 2 joints x (3D pos + 6D rot)
         )
 
         # Arm swivel head: uses tokens [12:14] (L_Arm, R_Arm)
+        swivel_hidden = min(128, self.feat_dim)
         self.arm_swivel_head = nn.Sequential(
-            nn.Linear(self.feat_dim * 2, 128),
+            nn.Linear(self.feat_dim * 2, swivel_hidden),
             nn.LeakyReLU(0.1),
-            nn.Linear(128, 4)  # L/R x (cos, sin)
+            nn.Linear(swivel_hidden, 4)  # L/R x (cos, sin)
         )
 
         # Leg swivel head: uses tokens [14:16] (L_Leg, R_Leg)
         self.leg_swivel_head = nn.Sequential(
-            nn.Linear(self.feat_dim * 2, 128),
+            nn.Linear(self.feat_dim * 2, swivel_hidden),
             nn.LeakyReLU(0.1),
-            nn.Linear(128, 4)  # L/R x (cos, sin)
+            nn.Linear(swivel_hidden, 4)  # L/R x (cos, sin)
         )
 
     def tokenize(self, sparse_input, init_output):
@@ -387,6 +389,121 @@ class MANIKINNetworkJLM(nn.Module):
 
 
 # ============================================================================
+# MANIKINNetworkS: EgoPoser-based Lightweight Network (Small version)
+# ============================================================================
+
+class MANIKINNetworkS(nn.Module):
+    """
+    EgoPoser 기반 경량 MANIKIN 네트워크 (Small version)
+
+    AvatarPoser/EgoPoser 스타일의 단순 Transformer Encoder 사용:
+    - 토큰 구조 없음 (시퀀스 프레임만 처리)
+    - AlternativeST 대신 표준 TransformerEncoder
+    - Stage 1 제거 (직접 임베딩 → Transformer → Output)
+
+    Input: (B, T, 54) - 3 sparse joints × 18D
+    Output:
+        - torso: (B, T, 42) - 7 joints × 6D
+        - arm_swivel: (B, T, 4) - L/R × (cos, sin)
+        - leg_swivel: (B, T, 4) - L/R × (cos, sin)
+        - foot: (B, T, 18) - 2 ankles × (pos + rot)
+        - init_output: None (Stage 1 없음)
+
+    예상 파라미터: ~2.5M (vs MANIKINNetworkJLM ~9.4M)
+    """
+
+    def __init__(
+        self,
+        embed_dim=256,
+        num_layer=3,
+        nhead=8,
+        max_seq_len=3000,
+    ):
+        super().__init__()
+
+        self.input_dim = 54  # 3 joints × 18D
+        self.embed_dim = embed_dim
+
+        # Input embedding (EgoPoser style)
+        self.linear_embedding = nn.Linear(self.input_dim, embed_dim)
+
+        # Positional encoding (학습 가능)
+        self.pos_encoding = nn.Parameter(torch.zeros(1, max_seq_len, embed_dim))
+        trunc_normal_(self.pos_encoding, std=0.02)
+
+        # Standard Transformer Encoder (EgoPoser 스타일)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=nhead,
+            dim_feedforward=embed_dim * 4,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layer)
+
+        # Output heads (MLP: Linear → ReLU → Linear)
+        self.torso_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, 42)  # 7 joints × 6D
+        )
+        self.arm_swivel_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, 4)  # L/R × (cos, sin)
+        )
+        self.leg_swivel_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, 4)  # L/R × (cos, sin)
+        )
+        self.foot_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, 18)  # 2 ankles × (pos(3) + rot(6))
+        )
+
+    def forward(self, sparse_input):
+        """
+        Forward pass.
+
+        Args:
+            sparse_input: (B, T, 54) - 3 sparse joints × 18D
+
+        Returns:
+            dict matching MANIKINNetworkJLM output format:
+                - torso: (B, T, 42)
+                - arm_swivel: (B, T, 4)
+                - leg_swivel: (B, T, 4)
+                - foot: (B, T, 18)
+                - init_output: None (no Stage 1)
+        """
+        batch, seq_len = sparse_input.shape[:2]
+
+        # Embed input
+        x = self.linear_embedding(sparse_input)  # (B, T, embed_dim)
+
+        # Add positional encoding
+        x = x + self.pos_encoding[:, :seq_len]
+
+        # Transformer
+        x = self.transformer(x)  # (B, T, embed_dim)
+
+        # Output heads (process all frames)
+        torso = self.torso_head(x)           # (B, T, 42)
+        arm_swivel = self.arm_swivel_head(x) # (B, T, 4)
+        leg_swivel = self.leg_swivel_head(x) # (B, T, 4)
+        foot = self.foot_head(x)             # (B, T, 18)
+
+        return {
+            'torso': torso,              # (B, T, 42) - 7 joints
+            'arm_swivel': arm_swivel,    # (B, T, 4)
+            'leg_swivel': leg_swivel,    # (B, T, 4)
+            'foot': foot,                # (B, T, 18) - pos + rot per ankle
+            'init_output': None,         # No Stage 1
+        }
+
+
+# ============================================================================
 # Test Code
 # ============================================================================
 
@@ -394,15 +511,15 @@ if __name__ == '__main__':
     # Test network
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Create network
+    # Create network with reduced dimensions
     net = MANIKINNetworkJLM(
-        embed_dim=512,
-        joint_embed_dim=256,
-        num_layer=6,
+        embed_dim=256,
+        feat_dim=256,
+        num_layer=3,
         s_layer=1,
         t_layer=1,
         nhead=8,
-        reg_hidden_dim=1024,
+        reg_hidden_dim=512,
     ).to(device)
 
     # Count parameters

@@ -12,6 +12,7 @@ import random
 import logging
 import numpy as np
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 sys.path.append('.')
 sys.path.append('AvatarPoser')
@@ -63,14 +64,52 @@ class MANIKINDataset(Dataset):
                 self.filename_list += glob.glob(pattern, recursive=True)
         
         self.filename_list.sort()
-        
+
         if len(self.filename_list) == 0:
             print(f"Warning: No data files found in {dataroot_list}")
             print("Please run: python Manikin/data/prepare_manikin_data.py first")
         else:
             print(f"Found {len(self.filename_list)} files for {self.phase}")
+
+        # RAM 캐싱: 전체 데이터를 메모리에 로드 (I/O 병목 해결)
+        self.data_cache = {}
+        cache_in_memory = opt.get('cache_in_memory', True)
+        if cache_in_memory and len(self.filename_list) > 0:
+            print(f"Loading {len(self.filename_list)} files into memory...")
+            for filename in tqdm(self.filename_list, desc="Caching data"):
+                with open(filename, 'rb') as f:
+                    self.data_cache[filename] = pickle.load(f)
+            print(f"Cached {len(self.data_cache)} files in RAM")
+
+        # Test용 sliding window 인덱스 사전 계산 (overlap 없음)
+        if self.phase == 'test' and len(self.filename_list) > 0:
+            self.test_windows = []  # [(file_idx, start, end), ...]
+
+            for file_idx, filename in enumerate(self.filename_list):
+                # 캐시에서 로드 (없으면 디스크에서)
+                if filename in self.data_cache:
+                    data = self.data_cache[filename]
+                else:
+                    with open(filename, 'rb') as f:
+                        data = pickle.load(f)
+                seq_len = data['hmd_position_global_full_gt_list'].shape[0]
+
+                # 시퀀스가 window_size보다 작으면 전체를 하나의 window로
+                if seq_len <= self.window_size:
+                    self.test_windows.append((file_idx, 0, seq_len))
+                else:
+                    # Non-overlapping windows (stride = window_size)
+                    for start in range(0, seq_len, self.window_size):
+                        end = min(start + self.window_size, seq_len)
+                        # 마지막 window가 너무 짧으면 skip (최소 10프레임)
+                        if end - start >= 10:
+                            self.test_windows.append((file_idx, start, end))
+
+            print(f"Test: {len(self.filename_list)} files -> {len(self.test_windows)} windows")
     
     def __len__(self):
+        if self.phase == 'test' and hasattr(self, 'test_windows'):
+            return len(self.test_windows)
         return max(len(self.filename_list), self.batch_size)
     
     def __getitem__(self, idx):
@@ -87,21 +126,29 @@ class MANIKINDataset(Dataset):
         
         idx = idx % len(self.filename_list)
         filename = self.filename_list[idx]
-        
-        with open(filename, 'rb') as f:
-            data = pickle.load(f)
-        
+
+        # 캐시에서 로드 (없으면 디스크에서)
+        if filename in self.data_cache:
+            data = self.data_cache[filename]
+        else:
+            with open(filename, 'rb') as f:
+                data = pickle.load(f)
+
         # Get sequence length
         sparse_input_full = data['hmd_position_global_full_gt_list']  # (T, 54)
         seq_len = sparse_input_full.shape[0]
-        
+
         if self.phase == 'train':
             # Skip sequences shorter than window size
             while seq_len <= self.window_size:
                 idx = random.randint(0, len(self.filename_list) - 1)
                 filename = self.filename_list[idx]
-                with open(filename, 'rb') as f:
-                    data = pickle.load(f)
+                # 캐시에서 로드
+                if filename in self.data_cache:
+                    data = self.data_cache[filename]
+                else:
+                    with open(filename, 'rb') as f:
+                        data = pickle.load(f)
                 sparse_input_full = data['hmd_position_global_full_gt_list']
                 seq_len = sparse_input_full.shape[0]
             
@@ -177,50 +224,73 @@ class MANIKINDataset(Dataset):
             }
         
         else:
-            # Test: return full sequence
-            sparse_input = sparse_input_full
-            poses_gt = data['rotation_local_full_gt_list']
-            head_trans = data['head_global_trans_list']
-            
-            # Convert to tensors (always ensure float32)
+            # Test: return windowed data (same as train for max_seq_len compatibility)
+            file_idx, start, end = self.test_windows[idx]
+            filename = self.filename_list[file_idx]
+
+            # 캐시에서 로드 (없으면 디스크에서)
+            if filename in self.data_cache:
+                data = self.data_cache[filename]
+            else:
+                with open(filename, 'rb') as f:
+                    data = pickle.load(f)
+
+            sparse_input_full = data['hmd_position_global_full_gt_list']
+            total_seq_len = sparse_input_full.shape[0]
+
+            # Extract windowed data
+            sparse_input = sparse_input_full[start:end]
+            poses_gt = data['rotation_local_full_gt_list'][start:end]
+            head_trans = data['head_global_trans_list'][start:end]
+
+            # MANIKIN specific
+            arm_swivel = data['arm_swivel_cos_sin'][start:end]
+            leg_swivel = data['leg_swivel_cos_sin'][start:end]
+            joint_pos = data['joint_positions'][start:end]
+
+            # Convert to tensors
             if isinstance(sparse_input, torch.Tensor):
                 sparse_input = sparse_input.float()
             else:
                 sparse_input = torch.tensor(sparse_input, dtype=torch.float32)
-            
+
             if isinstance(poses_gt, torch.Tensor):
                 poses_gt = poses_gt.float()
             else:
                 poses_gt = torch.tensor(poses_gt, dtype=torch.float32)
-            
+
             if isinstance(head_trans, torch.Tensor):
                 head_trans = head_trans.float()
             else:
                 head_trans = torch.tensor(head_trans, dtype=torch.float32)
-            
+
             # Get betas (subject-specific body shape)
             betas = data.get('betas', np.zeros(16))
             if isinstance(betas, np.ndarray):
                 betas = torch.tensor(betas, dtype=torch.float32)
-            
+
             return {
                 # AvatarPoser 호환
-                'L': sparse_input,  # (T, 54)
-                'H': poses_gt,  # (T, 132)
-                'Head_trans_global': head_trans,  # (T, 4, 4)
-                
+                'L': sparse_input,  # (window_size, 54)
+                'H': poses_gt,      # (window_size, 132)
+                'Head_trans_global': head_trans,
+
                 # For full sequence
                 'sparse': sparse_input,
                 'poses_gt': poses_gt,
-                
+
                 # MANIKIN specific
-                'arm_swivel_gt': torch.tensor(data['arm_swivel_cos_sin'], dtype=torch.float32),
-                'leg_swivel_gt': torch.tensor(data['leg_swivel_cos_sin'], dtype=torch.float32),
-                'joint_positions': torch.tensor(data['joint_positions'], dtype=torch.float32),
+                'arm_swivel_gt': torch.tensor(arm_swivel, dtype=torch.float32),
+                'leg_swivel_gt': torch.tensor(leg_swivel, dtype=torch.float32),
+                'joint_positions': torch.tensor(joint_pos, dtype=torch.float32),
                 'bone_lengths': data['bone_lengths'],
                 'betas': betas,  # (16,) subject-specific body shape
-                
+
+                # Window metadata (for result reconstruction)
                 'filename': filename,
+                'window_start': start,
+                'window_end': end,
+                'seq_len': total_seq_len,
             }
     
     def _get_dummy_data(self):
@@ -262,6 +332,10 @@ class MANIKINDataset(Dataset):
             'left_hip_pos': torch.zeros(window, 3),
             'right_hip_pos': torch.zeros(window, 3),
             'filename': 'dummy',
+            # Test metadata
+            'window_start': 0,
+            'window_end': window,
+            'seq_len': window,
         }
 
 

@@ -8,7 +8,8 @@ Includes:
 """
 
 from .manikin_logger import MANIKINLogger, GradientTracker, create_logger
-from .manikin_loss_module import MANIKINLossJLM, compute_mpjpe, compute_pa_mpjpe
+# NOTE: manikin_loss_module is NOT imported here to avoid circular imports
+# Import directly: from utils.manikin_loss_module import MANIKINLossJLM
 from .rotation_utils import (
     # SAGE quaternion functions
     quaternion_to_matrix,

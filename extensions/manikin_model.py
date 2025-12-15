@@ -47,7 +47,7 @@ from .manikin_core import (
     quat_identity, quat_normalize, quat_multiply, quat_conjugate,
     quat_to_sixd, sixd_to_quat, JointIdx, EPS
 )
-from .manikin_network import MANIKINNetworkJLM
+from .manikin_network import MANIKINNetworkJLM, MANIKINNetworkS
 from .torso_fk import TorsoFK
 from .analytic_solver import AnalyticArmSolver, AnalyticLegSolver, compute_bone_lengths_from_positions
 
@@ -105,16 +105,28 @@ class MANIKINModelJLM(nn.Module):
             config = {}
 
         netG = config.get('netG', {})
-        embed_dim = netG.get('embed_dim', 512)
+        net_type = netG.get('net_type', 'MANIKIN_L')  # 기본값은 L (Large)
+        embed_dim = netG.get('embed_dim', 256)
         nhead = netG.get('nhead', 8)
-        num_layer = netG.get('num_layer', 6)
+        num_layer = netG.get('num_layer', 3)
 
-        # Network
-        self.network = MANIKINNetworkJLM(
-            embed_dim=embed_dim,
-            nhead=nhead,
-            num_layer=num_layer
-        )
+        # Network selection
+        if net_type == 'MANIKIN_S':
+            # Small version: EgoPoser-based lightweight network
+            self.network = MANIKINNetworkS(
+                embed_dim=embed_dim,
+                num_layer=num_layer,
+                nhead=nhead,
+            )
+        else:
+            # Large version (default): Token-based AlternativeST network
+            feat_dim = netG.get('feat_dim', 256)
+            self.network = MANIKINNetworkJLM(
+                embed_dim=embed_dim,
+                feat_dim=feat_dim,
+                nhead=nhead,
+                num_layer=num_layer
+            )
 
         # FK/IK modules
         self.torso_fk = TorsoFK(body_model)

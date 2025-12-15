@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data.manikin_dataset import MANIKINDataset
 from models.model_manikin import ModelMANIKIN
+from utils.manikin_loss_module import compute_mpjpe, compute_mpjve, compute_jitter
 
 
 # =============================================================================
@@ -121,24 +122,28 @@ def find_last_checkpoint(models_dir):
 # Testing Function
 # =============================================================================
 
-def test(model, test_loader, opt, logger, current_step):
+def test(model, test_loader, _opt, logger, current_step):
     """
-    Run evaluation on test set
+    Run evaluation on test set with proper MPJPE/MPJVE metrics
 
     Args:
         model: ModelMANIKIN instance
         test_loader: DataLoader for test set
-        opt: config dict
+        opt: config dict (unused but kept for API compatibility)
         logger: logger instance
         current_step: current training iteration
     """
     model.net.eval()
 
-    rot_error = []
-    pos_error = []
-    vel_error = []
+    # Metric accumulators
+    all_mpjpe = []          # Full body MPJPE (mm)
+    all_mpjpe_elbow = []    # Elbow MPJPE (mm)
+    all_mpjpe_knee = []     # Knee MPJPE (mm)
+    all_mpjve = []          # Full body MPJVE (mm/s)
+    all_jitter = []         # Jitter (mm/s^2)
+    all_rot_error = []      # Rotation L1 error
 
-    for idx, test_data in enumerate(tqdm(test_loader, desc='Testing')):
+    for _, test_data in enumerate(tqdm(test_loader, desc='Testing')):
         model.feed_data(test_data, test=True)
 
         # Get sequence length
@@ -147,73 +152,115 @@ def test(model, test_loader, opt, logger, current_step):
             continue
 
         # Inference
-        pred = model.test()
+        with torch.no_grad():
+            pred = model.test()
 
-        # Compute metrics
-        pred_poses = pred['full_body_6d']  # (1, T, 22, 6)
+        # Ground truth
         gt_poses = model.poses_gt.reshape(1, -1, 22, 6)
-
-        pred_positions = pred.get('joint_positions', None)
         gt_positions = model.joint_positions  # (1, T, 22, 3)
 
-        # Rotation error (degrees)
-        rot_err = torch.mean(torch.abs(pred_poses - gt_poses)).item()
-        rot_error.append(rot_err)
+        # Predicted poses
+        pred_poses = pred['full_body_6d']  # (1, T, 22, 6)
 
-        # Position error (MPJPE in meters)
-        if pred_positions is not None:
-            pos_err = torch.mean(torch.sqrt(
-                torch.sum((pred_positions - gt_positions) ** 2, dim=-1)
-            )).item()
+        # ------------------------------------------
+        # Rotation Error (L1 on 6D representation)
+        # ------------------------------------------
+        rot_err = torch.mean(torch.abs(pred_poses - gt_poses)).item()
+        all_rot_error.append(rot_err)
+
+        # ------------------------------------------
+        # MPJPE: Mean Per-Joint Position Error
+        # ------------------------------------------
+        if 'joint_positions' in pred:
+            pred_positions = pred['joint_positions']  # (1, T, 22, 3)
+
+            # Full body MPJPE
+            mpjpe = compute_mpjpe(
+                pred_positions.reshape(-1, 22, 3),
+                gt_positions.reshape(-1, 22, 3)
+            ) * 1000  # mm
+            all_mpjpe.append(mpjpe.item())
+
+            # MPJVE
+            if pred_positions.shape[1] > 1:
+                mpjve = compute_mpjve(pred_positions, gt_positions, fps=120) * 1000
+                all_mpjve.append(mpjve.item())
+
+                # Jitter
+                jitter = compute_jitter(pred_positions, fps=120) * 1000
+                all_jitter.append(jitter.item())
         else:
-            # Use elbow/knee positions if full positions not available
-            pred_elbow = pred['elbow_pos']
-            pred_knee = pred['knee_pos']
+            # Use mid-joint positions (elbow, knee)
+            pred_elbow = pred['elbow_pos']  # (1, T, 2, 3)
+            pred_knee = pred['knee_pos']    # (1, T, 2, 3)
+
             gt_elbow = torch.stack([
-                gt_positions[:, :, 18],  # L_ELBOW
-                gt_positions[:, :, 19]   # R_ELBOW
+                gt_positions[:, :, 10],  # L_ELBOW
+                gt_positions[:, :, 11]   # R_ELBOW
             ], dim=2)
             gt_knee = torch.stack([
                 gt_positions[:, :, 4],   # L_KNEE
                 gt_positions[:, :, 5]    # R_KNEE
             ], dim=2)
 
-            pos_err = 0.5 * (
-                torch.mean(torch.sqrt(torch.sum((pred_elbow - gt_elbow) ** 2, dim=-1))).item() +
-                torch.mean(torch.sqrt(torch.sum((pred_knee - gt_knee) ** 2, dim=-1))).item()
-            )
-        pos_error.append(pos_err)
+            # Elbow MPJPE
+            elbow_mpjpe = compute_mpjpe(
+                pred_elbow.reshape(-1, 2, 3),
+                gt_elbow.reshape(-1, 2, 3)
+            ) * 1000
+            all_mpjpe_elbow.append(elbow_mpjpe.item())
 
-        # Velocity error (cm/s @ 120fps)
-        if gt_positions.shape[1] > 1:
-            gt_vel = (gt_positions[:, 1:] - gt_positions[:, :-1]) * 120  # 120fps
-            if pred_positions is not None:
-                pred_vel = (pred_positions[:, 1:] - pred_positions[:, :-1]) * 120
-            else:
-                pred_vel = gt_vel  # Skip velocity if no positions
-            vel_err = torch.mean(torch.sqrt(
-                torch.sum((pred_vel - gt_vel) ** 2, dim=-1)
-            )).item()
-            vel_error.append(vel_err)
+            # Knee MPJPE
+            knee_mpjpe = compute_mpjpe(
+                pred_knee.reshape(-1, 2, 3),
+                gt_knee.reshape(-1, 2, 3)
+            ) * 1000
+            all_mpjpe_knee.append(knee_mpjpe.item())
+
+            # MPJVE for mid-joints
+            if pred_elbow.shape[1] > 1:
+                elbow_mpjve = compute_mpjve(pred_elbow, gt_elbow, fps=120) * 1000
+                knee_mpjve = compute_mpjve(pred_knee, gt_knee, fps=120) * 1000
+                all_mpjve.append((elbow_mpjve.item() + knee_mpjve.item()) / 2)
 
     model.net.train()
 
     # Compute averages
-    avg_rot = sum(rot_error) / len(rot_error) if rot_error else 0
-    avg_pos = sum(pos_error) / len(pos_error) if pos_error else 0
-    avg_vel = sum(vel_error) / len(vel_error) if vel_error else 0
+    results = {}
+
+    # Full body metrics
+    if all_mpjpe:
+        results['MPJPE'] = sum(all_mpjpe) / len(all_mpjpe)
+    # Mid-joint metrics (fallback)
+    if all_mpjpe_elbow:
+        results['MPJPE_elbow'] = sum(all_mpjpe_elbow) / len(all_mpjpe_elbow)
+    if all_mpjpe_knee:
+        results['MPJPE_knee'] = sum(all_mpjpe_knee) / len(all_mpjpe_knee)
+        results['MPJPE_mid'] = (results.get('MPJPE_elbow', 0) + results['MPJPE_knee']) / 2
+
+    if all_mpjve:
+        results['MPJVE'] = sum(all_mpjve) / len(all_mpjve)
+    if all_jitter:
+        results['Jitter'] = sum(all_jitter) / len(all_jitter)
+    if all_rot_error:
+        results['RotError'] = sum(all_rot_error) / len(all_rot_error)
 
     # Log results
-    logger.info(f'Step {current_step} | '
-                f'Rot Error: {avg_rot:.4f} | '
-                f'Pos Error (MPJPE): {avg_pos*100:.2f} cm | '
-                f'Vel Error: {avg_vel*100:.2f} cm/s')
+    log_msg = f'[Test] Step {current_step} | '
+    if 'MPJPE' in results:
+        log_msg += f"MPJPE: {results['MPJPE']:.2f}mm | "
+    if 'MPJPE_mid' in results:
+        log_msg += f"MPJPE_mid: {results['MPJPE_mid']:.2f}mm | "
+    if 'MPJVE' in results:
+        log_msg += f"MPJVE: {results['MPJVE']:.2f}mm/s | "
+    if 'Jitter' in results:
+        log_msg += f"Jitter: {results['Jitter']:.2f}mm/s² | "
+    if 'RotError' in results:
+        log_msg += f"RotErr: {results['RotError']:.4f}"
 
-    return {
-        'rot_error': avg_rot,
-        'pos_error': avg_pos,
-        'vel_error': avg_vel
-    }
+    logger.info(log_msg)
+
+    return results
 
 
 # =============================================================================

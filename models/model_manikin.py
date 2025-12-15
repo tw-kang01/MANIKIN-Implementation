@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.model_base import ModelBase
 from extensions.manikin_model import MANIKINModelJLM
-from utils.manikin_loss_module import MANIKINLossJLM
+from utils.manikin_loss_module import MANIKINLossJLM, compute_mpjpe, compute_mpjve
 
 
 def load_body_model(support_dir, device, gender='male'):
@@ -251,6 +251,67 @@ class ModelMANIKIN(ModelBase):
         self.log_dict['total_loss'] = total_loss.item()
         for k, v in loss_dict.items():
             self.log_dict[k] = v
+
+        # Compute MPJPE/MPJVE metrics (in mm and mm/s)
+        with torch.no_grad():
+            # Get predicted joint positions from model output
+            # pred contains elbow_pos, knee_pos, shoulder_pos, hip_pos
+            # We need full body positions - use FK if available
+            if 'joint_positions' in pred:
+                pred_positions = pred['joint_positions']  # (B, T, 22, 3)
+                gt_positions = self.joint_positions  # (B, T, 22, 3)
+
+                # Full body MPJPE
+                full_mpjpe = compute_mpjpe(
+                    pred_positions.reshape(-1, 22, 3),
+                    gt_positions.reshape(-1, 22, 3)
+                ) * 1000  # mm
+                self.log_dict['MPJPE'] = full_mpjpe.item()
+
+                # Full body MPJVE
+                if pred_positions.shape[1] > 1:
+                    full_mpjve = compute_mpjve(pred_positions, gt_positions, fps=120) * 1000
+                    self.log_dict['MPJVE'] = full_mpjve.item()
+            else:
+                # Approximate using available positions
+                # For now, compute metrics on mid-joints (elbow, knee)
+                pred_elbow = pred['elbow_pos']  # (B, T, 2, 3)
+                pred_knee = pred['knee_pos']    # (B, T, 2, 3)
+                gt_elbow = torch.stack([
+                    self.joint_positions[:, :, 10],  # L_ELBOW
+                    self.joint_positions[:, :, 11]   # R_ELBOW
+                ], dim=2)
+                gt_knee = torch.stack([
+                    self.joint_positions[:, :, 4],   # L_KNEE
+                    self.joint_positions[:, :, 5]    # R_KNEE
+                ], dim=2)
+
+                # Mid-joint MPJPE (elbow + knee average)
+                elbow_mpjpe = compute_mpjpe(
+                    pred_elbow.reshape(-1, 2, 3),
+                    gt_elbow.reshape(-1, 2, 3)
+                ) * 1000  # Convert to mm
+                knee_mpjpe = compute_mpjpe(
+                    pred_knee.reshape(-1, 2, 3),
+                    gt_knee.reshape(-1, 2, 3)
+                ) * 1000
+
+                self.log_dict['MPJPE_elbow'] = elbow_mpjpe.item()
+                self.log_dict['MPJPE_knee'] = knee_mpjpe.item()
+                self.log_dict['MPJPE_mid'] = (elbow_mpjpe.item() + knee_mpjpe.item()) / 2
+
+                # MPJVE for mid-joints
+                if pred_elbow.shape[1] > 1:  # Need at least 2 frames for velocity
+                    elbow_mpjve = compute_mpjve(
+                        pred_elbow, gt_elbow, fps=120
+                    ) * 1000  # mm/s
+                    knee_mpjve = compute_mpjve(
+                        pred_knee, gt_knee, fps=120
+                    ) * 1000
+
+                    self.log_dict['MPJVE_elbow'] = elbow_mpjve.item()
+                    self.log_dict['MPJVE_knee'] = knee_mpjve.item()
+                    self.log_dict['MPJVE_mid'] = (elbow_mpjve.item() + knee_mpjve.item()) / 2
 
     # ----------------------------------------
     # Testing
